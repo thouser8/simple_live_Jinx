@@ -1,6 +1,12 @@
 # =============================================================================
 #  Jinx Live —— 你自己的 Android TV 打包流程
 #
+#  【个性化改动怎么放】
+#    两种都不碰上游文件：
+#      1) 环境层面的（应用名、包名）→ 写下面 env，打包时临时改
+#      2) 源码层面的功能改动 → 放 custom/patches/*.patch，第 1b 步打包时打上
+#    upstream 文件在仓库里保持原样，所以每周同步永远是快进，不会冲突。
+#
 #  【为什么这样改名字不会被上游覆盖】
 #    你的仓库里，上游文件一个字节都不改：AndroidManifest.xml 里还是
 #    "Simple Live TV"，build.gradle.kts 里还是 com.xycz.simple_live_tv。
@@ -49,6 +55,35 @@ jobs:
     steps:
       - name: 1. 签出源码
         uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      #  应用 custom/patches 下的源码补丁
+      #
+      #  为什么用补丁而不是直接改源码：仓库里的 upstream 文件保持原样，
+      #  每周同步永远是快进，Git 没有东西可冲突。个性化改动放在补丁里，
+      #  打包时临时打到工作区。
+      #
+      #  上游如果重构了被补丁的文件 → 这里会明确报错并停下，
+      #  不会悄悄产出一个没打到补丁的包。修复方式：按新代码重新生成补丁。
+      # -----------------------------------------------------------------------
+      - name: 1b. 应用本地补丁
+        run: |
+          set -e
+          shopt -s nullglob
+          patches=(custom/patches/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "没有补丁，跳过"
+            exit 0
+          fi
+          for p in "${patches[@]}"; do
+            echo "===== $p ====="
+            if ! git -c core.autocrlf=false apply --check -p1 "$p"; then
+              echo "::error file=$p::补丁打不上。上游很可能改动了这个文件的对应区域，需要按新代码重新生成补丁。"
+              exit 1
+            fi
+            git -c core.autocrlf=false apply -p1 "$p"
+            echo "已应用"
+          done
 
       # -----------------------------------------------------------------------
       #  改名字 + 改包名
