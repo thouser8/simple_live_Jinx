@@ -64,27 +64,57 @@ jobs:
             exit 0
           fi
 
-          # 先合并但不提交：README.md 冲突属于预期情况，交给下面统一处理
+          # 先记录「本仓库主动删掉的路径」，合并后要一直保持删除
+          REMOVED_LIST=custom/removed-paths.txt
+          removed_paths() {
+            [ -f "$REMOVED_LIST" ] || return 0
+            grep -v '^[[:space:]]*#' "$REMOVED_LIST" | sed '/^[[:space:]]*$/d'
+          }
+
+          # 判断某个冲突文件是否属于「预期冲突」：README.md 或主动删除的路径
+          is_expected() {
+            local f="$1" p
+            [ "$f" = "README.md" ] && return 0
+            while IFS= read -r p; do
+              [ -z "$p" ] && continue
+              case "$f" in "$p"|"$p"/*) return 0 ;; esac
+            done < <(removed_paths)
+            return 1
+          }
+
+          # 先合并但不提交：README.md / 已删路径的冲突属于预期情况，交给下面统一处理
           set +e
           git merge --no-commit --no-ff upstream/master
           MERGE_RC=$?
           set -e
 
           if [ "$MERGE_RC" != "0" ]; then
-            # 除 README.md 之外的文件不允许冲突
-            OTHERS=$(git diff --name-only --diff-filter=U | grep -vx 'README.md' || true)
-            if [ -n "$OTHERS" ]; then
-              echo "::error::上游改动与以下文件冲突：$OTHERS，本次同步已放弃，仓库未被修改。"
-              echo "**冲突**：$OTHERS，已放弃本次合并，仓库保持原样。" >> "$GITHUB_STEP_SUMMARY"
+            BAD=""
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              is_expected "$f" || BAD="$BAD $f"
+            done < <(git diff --name-only --diff-filter=U)
+            if [ -n "$BAD" ]; then
+              echo "::error::上游改动与以下文件冲突：$BAD，本次同步已放弃，仓库未被修改。"
+              echo "**冲突**：$BAD，已放弃本次合并，仓库保持原样。" >> "$GITHUB_STEP_SUMMARY"
               git merge --abort
               exit 1
             fi
-            echo "README.md 与上游冲突，按约定保留本仓库版本。" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "冲突仅出现在 README.md 或已删除路径上，按约定保留本仓库现状。" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-          # 无论是否冲突，README.md 一律用我们自己的版本
+          # 1) README.md 一律用我们自己的版本
           git checkout HEAD -- README.md
           git add README.md
+
+          # 2) 主动删除的路径：上游即使改了/恢复了，也重新删掉
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            git rm -r -q --ignore-unmatch --cached -- "$p" >/dev/null 2>&1 || true
+            rm -rf -- "$p"
+          done < <(removed_paths)
+          git add -A
+
           git commit --no-edit
 
           git push origin HEAD:master
