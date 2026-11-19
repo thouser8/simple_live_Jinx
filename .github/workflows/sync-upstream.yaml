@@ -96,5 +96,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh workflow run My-TV-Build.yaml --ref master --repo "$GITHUB_REPOSITORY"
-          echo "已触发 TV 构建，完成后到 Actions 页面看结果。" | tee -a "$GITHUB_STEP_SUMMARY"
+          # 打上来源标记，构建完的邮件里会写明是「自动同步」触发的
+          gh workflow run My-TV-Build.yaml --ref master -f source="自动同步" --repo "$GITHUB_REPOSITORY"
+          echo "已触发 TV 构建，出包后会自动发邮件通知。" | tee -a "$GITHUB_STEP_SUMMARY"
