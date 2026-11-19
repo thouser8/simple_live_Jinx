@@ -1,0 +1,30 @@
+--- a/simple_live_tv_app/lib/app/app_style.dart
++++ b/simple_live_tv_app/lib/app/app_style.dart
+@@ -1,5 +1,3 @@
+-import 'dart:io';
+-
+ import 'package:flutter/material.dart';
+ import 'package:flutter_screenutil/flutter_screenutil.dart';
+ import 'package:get/get.dart';
+@@ -27,7 +25,7 @@
+     checkboxTheme: CheckboxThemeData(
+       fillColor: WidgetStateProperty.all(AppColors.lightColorScheme.primary),
+     ),
+-    fontFamily: Platform.isWindows ? 'Microsoft YaHei' : null,
++    fontFamily: 'MiSans',
+   );
+ 
+   static SizedBox get vGap4 => SizedBox(
+--- a/simple_live_tv_app/pubspec.yaml
++++ b/simple_live_tv_app/pubspec.yaml
+@@ -82,3 +82,10 @@
+     - assets/images/douyin_emoji/
+     - assets/icons/
+     - assets/lotties/
++  fonts:
++    - family: MiSans
++      fonts:
++        - asset: assets/fonts/MiSans-Regular.ttf
++          weight: 400
++        - asset: assets/fonts/MiSans-Bold.ttf
++          weight: 700

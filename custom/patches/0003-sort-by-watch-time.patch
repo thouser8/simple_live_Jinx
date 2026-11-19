@@ -1,0 +1,64 @@
+--- a/simple_live_tv_app/lib/services/follow_user_service.dart
++++ b/simple_live_tv_app/lib/services/follow_user_service.dart
+@@ -17,6 +17,7 @@
+ import 'package:simple_live_tv_app/services/current_room_service.dart';
+ import 'package:simple_live_tv_app/services/db_service.dart';
+ import 'package:simple_live_tv_app/services/local_storage_service.dart';
++import 'package:simple_live_tv_app/services/watch_stat_service.dart';
+ 
+ class FollowUserService extends BasePageController<FollowUser> {
+   static const String allTagName = "全部";
+@@ -93,8 +94,15 @@
+     if (list.isNotEmpty) {
+       unawaited(_refreshOnHomeStartup());
+     }
++    // 观看时长攒够整分钟后重排列表：这样从直播间退回来时顺序已经是最新的
++    unawaited(WatchStatService.instance.ensureReady());
++    WatchStatService.instance.onChanged = _resortByWatchStat;
+     initTimer();
+     super.onInit();
++  }
++
++  void _resortByWatchStat() {
++    sortList();
+   }
+ 
+   /// 加载标签实体，并把旧版本"仅存于 FollowUser.tag 字符串"的标签迁移为实体
+@@ -1721,6 +1729,7 @@
+ 
+   @override
+   void onClose() {
++    WatchStatService.instance.onChanged = null;
+     _updateGeneration++;
+     updating.value = false;
+     _cancelRefreshProgressReset();
+@@ -1934,16 +1943,25 @@
+   return displayList.sublist(0, limit);
+ }
+ 
+-/// 关注卡片排序：特别关注 > 直播中 > 关注时间倒序。
++/// 关注卡片排序：直播中 > 累计观看时长倒序 > 特别关注 > 关注时间倒序。
+ int compareFollowUsersValue(FollowUser a, FollowUser b) {
+-  if (a.isSpecialFollow != b.isSpecialFollow) {
+-    return a.isSpecialFollow ? -1 : 1;
+-  }
++  // 1) 直播中的一律排在最前
+   final aLiving = a.liveStatus.value == 2;
+   final bLiving = b.liveStatus.value == 2;
+   if (aLiving != bLiving) {
+     return aLiving ? -1 : 1;
+   }
++  // 2) 同组内按累计观看时长从多到少（本地统计，没看过视为 0）
++  final aWatch = WatchStatService.instance.secondsOf(a.siteId, a.roomId);
++  final bWatch = WatchStatService.instance.secondsOf(b.siteId, b.roomId);
++  if (aWatch != bWatch) {
++    return bWatch.compareTo(aWatch);
++  }
++  // 3) 时长相同：特别关注优先
++  if (a.isSpecialFollow != b.isSpecialFollow) {
++    return a.isSpecialFollow ? -1 : 1;
++  }
++  // 4) 再相同：新关注的在前
+   return b.addTime.compareTo(a.addTime);
+ }
+ 

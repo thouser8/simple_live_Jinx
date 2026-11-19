@@ -140,7 +140,7 @@ diff --git a/simple_live_tv_app/lib/services/watch_stat_service.dart b/simple_li
 new file mode 100644
 --- /dev/null
 +++ b/simple_live_tv_app/lib/services/watch_stat_service.dart
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,138 @@
 +import 'dart:async';
 +
 +import 'package:get/get.dart';
@@ -163,6 +163,10 @@ new file mode 100644
 +
 +  /// 秒数快照，供界面 Obx 订阅
 +  final RxMap<String, int> seconds = <String, int>{}.obs;
++
++  /// 累计过了一整分钟时的回调，用于让关注列表按新时长重排。
++  /// 按分钟触发而不是每次落盘都触发，避免列表频繁跳动。
++  void Function()? onChanged;
 +
 +  Box<dynamic>? _box;
 +  Future<void>? _loading;
@@ -262,11 +266,16 @@ new file mode 100644
 +  }
 +
 +  void addSeconds(String key, int delta) {
-+    final current = (seconds[key] ?? 0) + delta;
++    final before = seconds[key] ?? 0;
++    final current = before + delta;
 +    seconds[key] = current;
 +    final box = _box;
 +    if (box != null) {
 +      unawaited(box.put(key, current));
++    }
++    // 只有分钟数变化才通知：少了列表一天到晚重排，多了排序不及时
++    if (current ~/ 60 != before ~/ 60) {
++      onChanged?.call();
 +    }
 +  }
 +}
