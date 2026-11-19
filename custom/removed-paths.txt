@@ -1,0 +1,29 @@
+# 本仓库主动删除、并且每次同步后都要保持删除状态的路径
+#
+# 同步工作流（sync-upstream.yaml）合并完上游后，会按这个文件逐条 git rm，
+# 所以即使上游改了/恢复了这些文件，也不会重新出现在仓库里，更不会导致同步冲突。
+# 想恢复某个文件：从本文件删掉对应行，再从 git 历史里取回即可。
+#
+# 规则：一行一个路径，支持目录；# 开头是注释。
+
+# 只给旧 README 用的截图、收款码、群二维码（README 已精简）
+assets/screenshot_dark.jpg
+assets/screenshot_light.jpg
+assets/support_wechat.png
+assets/user_group_qq.jpg
+assets/user_group_wechat.jpg
+images/README
+
+# 上游的多平台发布流水线：只支持手动触发，依赖本仓库没有的 secrets，
+# 且只做手机端 / 桌面端 / 官方 TV 版打包，与 My-TV-Build.yaml 无关
+.github/workflows/publish_app_dev.yaml
+.github/workflows/publish_app_release.yml
+.github/workflows/publish_app_release_ios_manual.yml
+.github/workflows/publish_app_release_linux.yml
+.github/workflows/publish_app_release_macos_manual.yml
+.github/workflows/publish_app_release_windows.yml
+.github/workflows/publish_tv_app_dev.yaml
+.github/workflows/publish_tv_app_release.yaml
+
+# 只给 Windows 桌面版编译用的 mpv 预编译包（30 MB），TV 构建用不到
+third_party/mpv-dev-x86_64-20261021-git-e471496c56.7z
