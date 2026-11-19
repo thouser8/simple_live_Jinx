@@ -1,0 +1,84 @@
+--- a/simple_live_tv_app/lib/modules/home/home_page.dart
++++ b/simple_live_tv_app/lib/modules/home/home_page.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
+ import 'package:flutter_screenutil/flutter_screenutil.dart';
++import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+ import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
+ import 'package:get/get.dart';
+ import 'package:lottie/lottie.dart';
+@@ -42,12 +44,50 @@
+   late final DateTime _openedAt;
+   bool _autoFocusDone = false;
+ 
++  /// 遥控器菜单键刷新“我的关注”的节流间隔：
++  /// 误触/连按都只算一次，5 秒内不再重复刷新。
++  static const Duration _menuRefreshInterval = Duration(seconds: 5);
++  DateTime? _lastMenuRefreshAt;
++
+   @override
+   void initState() {
+     super.initState();
+     _openedAt = DateTime.now();
+     // 第一张卡片要等网格完成一帧构建后才有焦点节点，所以放到帧后再转移焦点
+     WidgetsBinding.instance.addPostFrameCallback((_) => _pollFirstFollowCard());
++  }
++
++  /// 首页按键：只有菜单键被这里消费，其余按键照旧交给焦点树
++  KeyEventResult _handlePageKey(FocusNode node, KeyEvent event) {
++    if (event is! KeyDownEvent) {
++      return KeyEventResult.ignored;
++    }
++    if (event.logicalKey == LogicalKeyboardKey.contextMenu) {
++      _refreshFollowByMenuKey();
++      return KeyEventResult.handled;
++    }
++    return KeyEventResult.ignored;
++  }
++
++  /// 菜单键 → 刷新“我的关注”，5 秒内只执行一次
++  void _refreshFollowByMenuKey() {
++    if (FollowUserService.instance.updating.value) {
++      SmartDialog.showToast("正在刷新中，请稍候");
++      return;
++    }
++    final last = _lastMenuRefreshAt;
++    final now = DateTime.now();
++    if (last != null) {
++      final elapsed = now.difference(last);
++      if (elapsed < _menuRefreshInterval) {
++        final wait = (_menuRefreshInterval - elapsed).inSeconds + 1;
++        SmartDialog.showToast("刚刚刷新过，请 $wait 秒后再试");
++        return;
++      }
++    }
++    _lastMenuRefreshAt = now;
++    FollowUserService.instance.refreshData();
++    SmartDialog.showToast("已刷新我的关注");
+   }
+ 
+   /// 把启动焦点落到“我的关注”的第一张卡片上。
+@@ -92,7 +132,13 @@
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return AppScaffold(
++    // 菜单键刷新“我的关注”：做一层不参与焦点遍历的 Focus，
++    // 只截获没被卡片/按钮消费的按键，不影响原有遥控器导航
++    return Focus(
++      canRequestFocus: false,
++      skipTraversal: true,
++      onKeyEvent: _handlePageKey,
++      child: AppScaffold(
+       child: Column(
+         children: [
+           AppStyle.vGap32,
+@@ -341,6 +387,7 @@
+           ),
+         ],
+       ),
++      ),
+     );
+   }
+ 
