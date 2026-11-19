@@ -1,0 +1,66 @@
+--- a/simple_live_tv_app/lib/modules/home/home_page.dart
++++ b/simple_live_tv_app/lib/modules/home/home_page.dart
+@@ -31,6 +31,52 @@
+   /// 不会因为重建换节点而回弹到顶部按钮。
+   final Map<String, AppFocusNode> _cardFocusNodes = <String, AppFocusNode>{};
+ 
++  /// 首帧时关注列表是否已有数据（关注列表从本地库同步读取，通常已就绪）。
++  /// 为空时把兜底焦点留给“热门直播”，避免启动后出现没有任何焦点的死状态。
++  late final bool _followReadyAtStart =
++      FollowUserService.instance.homeList.isNotEmpty;
++
++  /// 自动聚焦只在页面刚打开的这段时间内有效：
++  /// 关注数据可能异步到达，但用户一旦开始操作就不能再抢焦点。
++  static const Duration _autoFocusWindow = Duration(seconds: 6);
++  late final DateTime _openedAt;
++  bool _autoFocusDone = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _openedAt = DateTime.now();
++    // 第一张卡片要等网格完成一帧构建后才有焦点节点，所以放到帧后再转移焦点
++    WidgetsBinding.instance.addPostFrameCallback((_) => _pollFirstFollowCard());
++  }
++
++  /// 把启动焦点落到“我的关注”的第一张卡片上。
++  /// 关注列表可能比首帧晚一点就绪，这里短暂轮询，最多等 4 秒。
++  void _pollFirstFollowCard({int attempt = 0}) {
++    if (!mounted || _autoFocusDone) {
++      return;
++    }
++    final items = FollowUserService.instance.homeList;
++    if (items.isNotEmpty) {
++      final node = _cardFocusNodes[items.first.id];
++      if (node != null && node.context != null) {
++        _autoFocusDone = true;
++        node.requestFocus();
++        return;
++      }
++    }
++    if (attempt >= 40) {
++      return;
++    }
++    if (DateTime.now().difference(_openedAt) > _autoFocusWindow) {
++      return;
++    }
++    Future<void>.delayed(
++      const Duration(milliseconds: 100),
++      () => _pollFirstFollowCard(attempt: attempt + 1),
++    );
++  }
++
+   @override
+   void dispose() {
+     for (final node in _cardFocusNodes.values) {
+@@ -89,7 +135,9 @@
+                     children: [
+                       Expanded(
+                         child: HomeBigButton(
+-                          autofocus: true,
++                          // 关注有数据时不再抢焦点，交给第一张关注卡片；
++                          // 没有关注时才回落到这里，保证启动即有焦点
++                          autofocus: !_followReadyAtStart,
+                           focusNode: AppFocusNode(),
+                           text: "热门直播",
+                           iconData: Remix.fire_line,
