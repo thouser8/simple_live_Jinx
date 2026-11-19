@@ -52,6 +52,19 @@ jobs:
             exit 1
           fi
 
+      - name: 3b. 核对内置字体
+        run: |
+          set -e
+          echo "APK 体积: $(du -h app.apk | cut -f1)"
+          unzip -l app.apk | grep -i "flutter_assets/assets/fonts/" | tee fonts.txt || true
+          for f in MiSans-Regular.ttf MiSans-Bold.ttf; do
+            if ! grep -q "$f" fonts.txt; then
+              echo "::error::包里没有 $f，字体没打进去"
+              exit 1
+            fi
+          done
+          echo "两个 MiSans 字重均已打包"
+
       - name: 4. 汇总
         run: |
           echo "### 发布件自检结果" >> "$GITHUB_STEP_SUMMARY"
@@ -60,4 +73,8 @@ jobs:
           head -1 badging.txt >> "$GITHUB_STEP_SUMMARY"
           grep -m1 "^application-label:" badging.txt >> "$GITHUB_STEP_SUMMARY" || true
           grep "certificate DN\|SHA-256 digest" sig.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**包内字体**" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat fonts.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
