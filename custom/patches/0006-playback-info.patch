@@ -1,0 +1,415 @@
+--- a/simple_live_tv_app/lib/modules/live_room/live_room_page.dart
++++ b/simple_live_tv_app/lib/modules/live_room/live_room_page.dart
+@@ -10,6 +10,7 @@
+ import 'package:simple_live_tv_app/app/log.dart';
+ import 'package:simple_live_tv_app/modules/live_room/live_room_controller.dart';
+ import 'package:simple_live_tv_app/modules/live_room/player/player_controls.dart';
++import 'package:simple_live_tv_app/widgets/player_playback_info.dart';
+ 
+ class LiveRoomPage extends GetView<LiveRoomController> {
+   const LiveRoomPage({Key? key}) : super(key: key);
+@@ -271,6 +272,17 @@
+             ),
+           ),
+         ),
++        // 播放信息面板：设置面板里的“播放信息”打开后常驻左上角
++        Obx(
++          () => Visibility(
++            visible: controller.showPlaybackInfoState.value,
++            child: Positioned(
++              left: 24,
++              top: 24,
++              child: PlayerPlaybackInfoOverlay(controller: controller),
++            ),
++          ),
++        ),
+       ],
+     );
+   }
+--- a/simple_live_tv_app/lib/modules/live_room/player/player_controls.dart
++++ b/simple_live_tv_app/lib/modules/live_room/player/player_controls.dart
+@@ -16,6 +16,7 @@
+ import 'package:simple_live_tv_app/services/follow_user_service.dart';
+ import 'package:simple_live_tv_app/widgets/button/highlight_button.dart';
+ import 'package:simple_live_tv_app/widgets/card/anchor_card.dart';
++import 'package:simple_live_tv_app/widgets/player_playback_info.dart';
+ import 'package:simple_live_tv_app/widgets/settings_item_widget.dart';
+ import 'package:simple_live_tv_app/widgets/status/app_empty_widget.dart';
+ 
+@@ -529,6 +530,7 @@
+   var followFocusNode = AppFocusNode()..isFoucsed.value = true;
+   var specialFollowFocusNode = AppFocusNode();
+   var followTagFocusNode = AppFocusNode();
++  var playbackInfoFocusNode = AppFocusNode();
+   var qualityFoucsNode = AppFocusNode();
+   var lineFoucsNode = AppFocusNode();
+   var scaleFoucsNode = AppFocusNode();
+@@ -625,6 +627,13 @@
+                     },
+                   );
+                 },
++              ),
++
++              AppStyle.vGap24,
++              // 播放信息：打开后直播画面左上角常驻一块诊断小面板
++              PlaybackInfoSettingsItem(
++                controller: controller,
++                foucsNode: playbackInfoFocusNode,
+               ),
+ 
+               Divider(color: Colors.grey.withAlpha(50), height: 36.w),
+--- a/simple_live_tv_app/lib/modules/live_room/player/player_controller.dart
++++ b/simple_live_tv_app/lib/modules/live_room/player/player_controller.dart
+@@ -47,6 +47,14 @@
+ 
+   /// 是否显示设置窗口
+   RxBool showSettingState = false.obs;
++
++  /// 是否显示播放信息小面板（直播画面左上角）
++  RxBool showPlaybackInfoState = false.obs;
++
++  /// 切换播放信息面板
++  void togglePlaybackInfo() {
++    showPlaybackInfoState.value = !showPlaybackInfoState.value;
++  }
+ 
+   /// 是否显示弹幕设置窗口
+   RxBool showDanmakuSettingState = false.obs;
+--- /dev/null
++++ b/simple_live_tv_app/lib/widgets/player_playback_info.dart
+@@ -0,0 +1,335 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_screenutil/flutter_screenutil.dart';
++import 'package:get/get.dart';
++import 'package:media_kit/media_kit.dart';
++import 'package:simple_live_tv_app/app/app_focus_node.dart';
++import 'package:simple_live_tv_app/app/app_style.dart';
++import 'package:simple_live_tv_app/app/controller/app_settings_controller.dart';
++import 'package:simple_live_tv_app/modules/live_room/live_room_controller.dart';
++import 'package:simple_live_tv_app/widgets/highlight_widget.dart';
++
++/// 需要向 mpv 读取的诊断属性（沿用手机版“播放信息”的口径）。
++const List<String> _mpvDiagnosticProperties = [
++  'hwdec-current',
++  'video-codec',
++  'audio-codec-name',
++  'estimated-vf-fps',
++  'container-fps',
++  'video-bitrate',
++  'frame-drop-count',
++  'demuxer-cache-duration',
++];
++
++/// 播放画面左上角的“播放信息”小面板。
++///
++/// 只在 [LiveRoomController.showPlaybackInfoState] 为 true 时由直播页挂载，
++/// 每秒重新读一次 mpv 属性，所以硬解/码率/FPS 这类会变的值也能跟着刷新。
++class PlayerPlaybackInfoOverlay extends StatefulWidget {
++  final LiveRoomController controller;
++
++  const PlayerPlaybackInfoOverlay({required this.controller, super.key});
++
++  @override
++  State<PlayerPlaybackInfoOverlay> createState() =>
++      _PlayerPlaybackInfoOverlayState();
++}
++
++class _PlayerPlaybackInfoOverlayState extends State<PlayerPlaybackInfoOverlay> {
++  Timer? _timer;
++  Map<String, String> _mpv = const {};
++
++  @override
++  void initState() {
++    super.initState();
++    _refresh();
++    _timer = Timer.periodic(
++      const Duration(seconds: 1),
++      (_) => _refresh(),
++    );
++  }
++
++  @override
++  void dispose() {
++    _timer?.cancel();
++    super.dispose();
++  }
++
++  Future<void> _refresh() async {
++    final platform = widget.controller.player.platform;
++    if (platform is! NativePlayer) {
++      if (mounted && _mpv.isNotEmpty) {
++        setState(() => _mpv = const {});
++      }
++      return;
++    }
++    final result = <String, String>{};
++    for (final name in _mpvDiagnosticProperties) {
++      try {
++        final value = (await platform.getProperty(name)).trim();
++        if (value.isNotEmpty) {
++          result[name] = value;
++        }
++      } catch (_) {
++        // 属性在部分解码后端不存在，忽略即可
++      }
++    }
++    if (!mounted) {
++      return;
++    }
++    setState(() => _mpv = result);
++  }
++
++  String _value(String key) {
++    final value = _mpv[key]?.trim() ?? '';
++    if (value.isEmpty || value == 'no' || value == 'unknown') {
++      return '';
++    }
++    return value;
++  }
++
++  /// 码率：mpv 给的是 bit/s 的裸数字，转成 Mbps/kbps 更好读
++  String _bitrate() {
++    final raw = _value('video-bitrate');
++    if (raw.isEmpty) {
++      final track = widget.controller.player.state.track.video.bitrate;
++      if (track == null || track <= 0) {
++        return '—';
++      }
++      return _formatBits(track.toDouble());
++    }
++    final parsed = double.tryParse(raw);
++    if (parsed == null) {
++      return raw;
++    }
++    return _formatBits(parsed);
++  }
++
++  String _formatBits(double bits) {
++    if (bits >= 1000 * 1000) {
++      return '${(bits / 1000 / 1000).toStringAsFixed(2)} Mbps';
++    }
++    if (bits >= 1000) {
++      return '${(bits / 1000).toStringAsFixed(0)} kbps';
++    }
++    return '${bits.toStringAsFixed(0)} bps';
++  }
++
++  String _fps() {
++    final raw = _value('estimated-vf-fps').isNotEmpty
++        ? _value('estimated-vf-fps')
++        : _value('container-fps');
++    if (raw.isEmpty) {
++      final trackFps = widget.controller.player.state.track.video.fps;
++      return trackFps == null ? '—' : trackFps.toStringAsFixed(2);
++    }
++    final parsed = double.tryParse(raw);
++    return parsed == null ? raw : parsed.toStringAsFixed(2);
++  }
++
++  String _codec() {
++    final raw = _value('video-codec');
++    if (raw.isNotEmpty) {
++      return raw;
++    }
++    final codec = widget.controller.player.state.track.video.codec;
++    return (codec == null || codec.isEmpty) ? '—' : codec;
++  }
++
++  /// 硬解：mpv 的 hwdec-current 为空/no 即软件解码
++  String _decode() {
++    const software = '软解（CPU）';
++    final raw = _value('hwdec-current');
++    if (raw.isEmpty) {
++      return software;
++    }
++    final audio = _value('audio-codec-name');
++    final hardware = '硬解 · $raw';
++    return audio.isEmpty ? hardware : '$hardware ／ 音频 $audio';
++  }
++
++  String _buffer() {
++    final raw = _value('demuxer-cache-duration');
++    final parsed = double.tryParse(raw);
++    if (parsed == null) {
++      return '—';
++    }
++    return '${parsed.toStringAsFixed(1)} 秒';
++  }
++
++  String _resolution() {
++    final player = widget.controller.player;
++    final width = player.state.width ?? 0;
++    final height = player.state.height ?? 0;
++    if (width <= 0 || height <= 0) {
++      final w = widget.controller.width.value;
++      final h = widget.controller.height.value;
++      if (w <= 0 || h <= 0) {
++        return '—';
++      }
++      return '$w × $h';
++    }
++    return '$width × $height';
++  }
++
++  List<List<String>> _rows() {
++    final controller = widget.controller;
++    final detail = controller.detail.value;
++    final quality = controller.currentQualityInfo.value.trim();
++    final line = controller.currentLineInfo.value.trim();
++    final volume = AppSettingsController.instance.effectivePlayerVolume;
++    final drops = _value('frame-drop-count');
++    return [
++      ['主播', (detail?.userName ?? '').isEmpty ? '—' : detail!.userName],
++      ['平台／房间', '${controller.site.name} · ${controller.roomId}'],
++      ['清晰度', quality.isEmpty ? '—' : quality],
++      ['线路', line.isEmpty ? '—' : line],
++      ['分辨率', _resolution()],
++      ['视频编码', _codec()],
++      ['帧率', _fps()],
++      ['视频码率', _bitrate()],
++      ['解码', _decode()],
++      ['丢帧', drops.isEmpty ? '—' : drops],
++      ['缓冲', _buffer()],
++      ['音量', '${volume.round()}%'],
++    ];
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final rows = _rows();
++    return IgnorePointer(
++      child: Container(
++        width: 660.w,
++        padding: EdgeInsets.fromLTRB(28.w, 20.w, 28.w, 24.w),
++        decoration: BoxDecoration(
++          color: Colors.black.withValues(alpha: 0.62),
++          borderRadius: AppStyle.radius16,
++          border: Border.all(color: Colors.white24, width: 1.5.w),
++        ),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Row(
++              children: [
++                Icon(Icons.monitor_heart_outlined,
++                    color: Colors.white70, size: 30.w),
++                AppStyle.hGap12,
++                Text(
++                  "播放信息",
++                  style: TextStyle(
++                    color: Colors.white,
++                    fontSize: 28.w,
++                    fontWeight: FontWeight.bold,
++                  ),
++                ),
++              ],
++            ),
++            SizedBox(height: 12.w),
++            Divider(color: Colors.white24, height: 1.w),
++            SizedBox(height: 10.w),
++            ...rows.map(
++              (row) => Padding(
++                padding: EdgeInsets.symmetric(vertical: 5.w),
++                child: Row(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    SizedBox(
++                      width: 150.w,
++                      child: Text(
++                        row[0],
++                        style: TextStyle(color: Colors.white60, fontSize: 24.w),
++                      ),
++                    ),
++                    Expanded(
++                      child: Text(
++                        row[1],
++                        style: TextStyle(
++                          color: Colors.white,
++                          fontSize: 24.w,
++                          fontWeight: FontWeight.w500,
++                        ),
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// 设置面板里的“播放信息”一栏。
++///
++/// 遥控器 OK 键 / 左右键都能切换，打开时顺手关掉设置面板，
++/// 让左上角的面板立刻可见。
++class PlaybackInfoSettingsItem extends StatelessWidget {
++  final LiveRoomController controller;
++  final AppFocusNode foucsNode;
++
++  const PlaybackInfoSettingsItem({
++    required this.controller,
++    required this.foucsNode,
++    super.key,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return Obx(() {
++      final focused = foucsNode.isFoucsed.value;
++      final enabled = controller.showPlaybackInfoState.value;
++      final titleStyle =
++          focused ? AppStyle.textStyleBlack : AppStyle.textStyleWhite;
++      final hintStyle = TextStyle(
++        color: focused ? Colors.black54 : Colors.white54,
++        fontSize: 20.w,
++      );
++      return HighlightWidget(
++        focusNode: foucsNode,
++        borderRadius: AppStyle.radius16,
++        onLeftKey: () {
++          _toggle(closeSettings: false);
++          return KeyEventResult.handled;
++        },
++        onRightKey: () {
++          _toggle(closeSettings: false);
++          return KeyEventResult.handled;
++        },
++        onTap: () {
++          _toggle(closeSettings: true);
++        },
++        child: Padding(
++          padding: AppStyle.edgeInsetsA24,
++          child: Row(
++            children: [
++              Text("播放信息", style: titleStyle),
++              AppStyle.hGap12,
++              Text("（直播画面左上角）", style: hintStyle),
++              const Spacer(),
++              Text(enabled ? "开" : "关", style: titleStyle),
++            ],
++          ),
++        ),
++      );
++    });
++  }
++
++  void _toggle({required bool closeSettings}) {
++    final enabled = !controller.showPlaybackInfoState.value;
++    controller.showPlaybackInfoState.value = enabled;
++    if (enabled && closeSettings) {
++      // 设置面板是 Get.dialog，等本次按键处理完再关，
++      // 免得和面板内部的 Get.back() 抢同一次出栈
++      Future<void>.delayed(Duration.zero, () {
++        if (Get.isDialogOpen == true) {
++          Get.back();
++        }
++      });
++    }
++  }
++}
