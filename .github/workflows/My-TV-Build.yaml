@@ -30,11 +30,25 @@
 #      TV_CERT_SHA256（用来核对签名是否真的生效）
 #    第 7b 步会读 APK 的实际签名证书，对不上直接失败，不会产出假成功的包。
 #    密钥原件的本地备份：工作区 signing/ 目录（密钥信息与填写清单.txt）。
+#
+#  【出包后发邮件】2026-11-20 起
+#    第 12 步用 QQ 邮箱 SMTP 把新包信息发到 MAIL_TO。
+#    Settings → Secrets 里已有（不写在仓库里，公开仓库也看不到）：
+#      MAIL_USERNAME  发件邮箱
+#      MAIL_AUTH_CODE QQ 邮箱「授权码」，不是登录密码
+#      MAIL_TO        收件邮箱
+#    换邮箱只改这三个 secret，不用动这个文件。
+#    邮件发失败不会让构建失败（包已经在 Releases 里了），只在日志和 Summary 里告警。
 # =============================================================================
 name: My TV Build (Jinx)
 
 on:
   workflow_dispatch:
+    inputs:
+      source:
+        description: "触发来源（同步工作流会自动填）"
+        required: false
+        default: "手动"
 
 permissions:
   contents: write
@@ -52,6 +66,9 @@ jobs:
       SP: ${{ secrets.TV_STORE_PASSWORD }}
       KP: ${{ secrets.TV_KEY_PASSWORD }}
       KA: ${{ secrets.TV_KEY_ALIAS }}
+      MU: ${{ secrets.MAIL_USERNAME }}
+      MC: ${{ secrets.MAIL_AUTH_CODE }}
+      MT: ${{ secrets.MAIL_TO }}
     steps:
       - name: 1. 签出源码
         uses: actions/checkout@v4
@@ -218,6 +235,7 @@ jobs:
         run: echo "d=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
 
       - name: 11. 发到 Releases
+        id: rel
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "jinx_v${{ steps.ver.outputs.v }}-${{ steps.stamp.outputs.d }}"
@@ -230,3 +248,103 @@ jobs:
             simple_live_tv_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
             simple_live_tv_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
             simple_live_tv_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
+
+      # -----------------------------------------------------------------------
+      #  邮件通知：新包已发布 → 发一封带直链的邮件
+      #  发不出去只告警，不让构建失败（包已经在 Releases 里了）
+      # -----------------------------------------------------------------------
+      - name: 12. 发邮件通知
+        if: env.MU != '' && env.MC != '' && env.MT != ''
+        env:
+          TAG: jinx_v${{ steps.ver.outputs.v }}-${{ steps.stamp.outputs.d }}
+          VER: ${{ steps.ver.outputs.v }}
+          STAMP: ${{ steps.stamp.outputs.d }}
+          SOURCE: ${{ github.event.inputs.source }}
+        run: |
+          python3 - <<'PY'
+          import os, smtplib, ssl, subprocess, datetime
+          from email.message import EmailMessage
+          from email.utils import formatdate, make_msgid
+
+          user = os.environ["MU"]; code = os.environ["MC"]; to = os.environ["MT"]
+          tag  = os.environ["TAG"]; ver = os.environ["VER"]; stamp = os.environ["STAMP"]
+          src  = (os.environ.get("SOURCE") or "手动").strip()
+          repo = os.environ["GITHUB_REPOSITORY"]; sha = os.environ["GITHUB_SHA"]
+          subject = subprocess.run(["git", "log", "-1", "--pretty=%s"],
+                                   capture_output=True, text=True).stdout.strip() or "(无提交说明)"
+
+          # 构建时间：STAMP 是 UTC，邮件里给北京时间
+          utc = datetime.datetime.strptime(stamp, "%Y%m%d-%H%M").replace(tzinfo=datetime.timezone.utc)
+          bj  = utc.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
+          when = bj.strftime("%Y-%m-%d %H:%M")
+
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+          rel  = f"https://github.com/{repo}/releases/tag/{tag}"
+          outdir = "simple_live_tv_app/build/app/outputs/flutter-apk"
+          apks = [
+              ("app-arm64-v8a-release.apk",   "arm64-v8a",   "大多数 64 位电视 / 电视盒子，优先下这个"),
+              ("app-armeabi-v7a-release.apk", "armeabi-v7a", "较老的 32 位电视设备"),
+              ("app-x86_64-release.apk",      "x86_64",      "模拟器 / x86 设备"),
+          ]
+
+          rows = []
+          for name, abi, desc in apks:
+              p = os.path.join(outdir, name)
+              size = f"{os.path.getsize(p) / 1048576:.2f} MB" if os.path.exists(p) else "未产出"
+              rows.append((abi, size, desc, f"{base}/{name}"))
+
+          text = [f"Jinx Live TV {ver} 已构建完成", f"构建时间：{when}（北京时间）",
+                  f"触发来源：{src}", f"提交：{sha[:8]} {subject}", "", "下载："]
+          text += [f"- {abi}  {size}  {url}" for abi, size, _, url in rows]
+          text += ["", f"发布页：{rel}", "包名：com.xycz.simple_live_tv.jinx",
+                   "签名核对：通过（不是 debug 签名）", "内置字体核对：MiSans 已打包", "",
+                   "邮件由 GitHub Actions 自动发送，发不出去不影响构建。"]
+
+          html_rows = "".join(
+              f'<tr><td style="padding:8px 10px;border-bottom:1px solid #eee;white-space:nowrap">'
+              f'<b>{abi}</b></td>'
+              f'<td style="padding:8px 10px;border-bottom:1px solid #eee;white-space:nowrap">{size}</td>'
+              f'<td style="padding:8px 10px;border-bottom:1px solid #eee;color:#555">{desc}</td>'
+              f'<td style="padding:8px 10px;border-bottom:1px solid #eee">'
+              f'<a href="{url}" style="color:#1a73e8">下载</a></td></tr>'
+              for abi, size, desc, url in rows)
+          html = f"""<div style="font-family:-apple-system,Segoe UI,Microsoft YaHei,sans-serif;font-size:14px;color:#222;line-height:1.7">
+          <h2 style="margin:0 0 12px;font-size:18px">Jinx Live TV {ver} 已构建完成</h2>
+          <p style="margin:0 0 4px">构建时间：<b>{when}</b>（北京时间）</p>
+          <p style="margin:0 0 4px">触发来源：<b>{src}</b></p>
+          <p style="margin:0 0 16px">提交：<code>{sha[:8]}</code> {subject}</p>
+          <table style="border-collapse:collapse;font-size:13px">
+            <tr style="background:#f6f8fa"><th style="padding:8px 10px;text-align:left">架构</th>
+            <th style="padding:8px 10px;text-align:left">体积</th>
+            <th style="padding:8px 10px;text-align:left">适用</th>
+            <th style="padding:8px 10px;text-align:left">直链</th></tr>
+            {html_rows}
+          </table>
+          <p style="margin:16px 0 4px">包名 <code>com.xycz.simple_live_tv.jinx</code>（可覆盖升级）</p>
+          <p style="margin:0 0 4px">签名核对：<b>通过</b>（非 debug 签名）　字体核对：<b>MiSans 已打包</b></p>
+          <p style="margin:12px 0 0"><a href="{rel}" style="color:#1a73e8">打开发布页</a></p>
+          <p style="margin:16px 0 0;color:#888;font-size:12px">此邮件由 GitHub Actions 自动发送。</p>
+          </div>"""
+
+          msg = EmailMessage()
+          msg["Subject"] = f"[Jinx Live] 新包 {ver} ({when})"
+          msg["From"] = user
+          msg["To"] = to
+          msg["Date"] = formatdate(localtime=True)
+          msg["Message-ID"] = make_msgid()
+          msg.set_content("\n".join(text))
+          msg.add_alternative(html, subtype="html")
+
+          try:
+              with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30,
+                                    context=ssl.create_default_context()) as s:
+                  s.login(user, code)
+                  s.send_message(msg)
+              print(f"邮件已发送：{to}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write(f"\n- 邮件通知：已发送至 {to}\n")
+          except Exception as e:
+              print(f"::warning::邮件发送失败（不影响构建）：{type(e).__name__}: {e}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write(f"\n- 邮件通知：**发送失败** {type(e).__name__}: {e}\n")
+          PY
