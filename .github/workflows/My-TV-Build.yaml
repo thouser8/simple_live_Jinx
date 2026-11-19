@@ -18,10 +18,12 @@
 #    APP_ID    : 安装包的唯一标识。留空 = 保持原版 com.xycz.simple_live_tv
 #                填了 = 用你填的，可与官方版同时安装互不覆盖
 #
-#  【签名，可选】
-#    Settings → Secrets and variables → Actions 里配这四个就用你的签名：
+#  【签名】已配好（2026-11-19）
+#    Settings → Secrets and variables → Actions 里已有：
 #      TV_KEYSTORE_BASE64 / TV_STORE_PASSWORD / TV_KEY_PASSWORD / TV_KEY_ALIAS
-#    不配也能出包，Flutter 会用 debug 签名，一样能装。
+#      TV_CERT_SHA256（用来核对签名是否真的生效）
+#    第 7b 步会读 APK 的实际签名证书，对不上直接失败，不会产出假成功的包。
+#    密钥原件的本地备份：工作区 signing/ 目录（密钥信息与填写清单.txt）。
 # =============================================================================
 name: My TV Build (Jinx)
 
@@ -122,6 +124,31 @@ jobs:
         run: |
           cd simple_live_tv_app
           flutter build apk --release --split-per-abi
+
+      - name: 7b. 核对签名（确认真的用了你的密钥）
+        env:
+          EXPECT: ${{ secrets.TV_CERT_SHA256 }}
+        run: |
+          set -e
+          APK=simple_live_tv_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          INFO=$("$BT/apksigner" verify --print-certs "$APK")
+          echo "$INFO"
+          GOT=$(echo "$INFO" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d ' ' | tr 'a-f' 'A-F')
+          echo "实际签名证书 SHA-256 : $GOT"
+          if echo "$INFO" | grep -qi "CN=Android Debug"; then
+            echo "::error::检出的是 Android Debug 证书，签名密钥没有生效"
+            exit 1
+          fi
+          if [ -n "$EXPECT" ]; then
+            if [ "$GOT" != "$EXPECT" ]; then
+              echo "::error::签名证书不匹配（期望 $EXPECT）"
+              exit 1
+            fi
+            echo "签名证书与预期一致"
+          else
+            echo "未配置 TV_CERT_SHA256，仅做 debug 证书排除检查"
+          fi
 
       - name: 8. 存到 Artifacts
         uses: actions/upload-artifact@v4
