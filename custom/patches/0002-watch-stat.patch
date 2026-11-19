@@ -1,0 +1,272 @@
+--- a/simple_live_tv_app/lib/widgets/card/anchor_card.dart
++++ b/simple_live_tv_app/lib/widgets/card/anchor_card.dart
+@@ -5,6 +5,7 @@
+ import 'package:simple_live_tv_app/app/app_style.dart';
+ import 'package:simple_live_tv_app/app/sites.dart';
+ import 'package:simple_live_tv_app/routes/app_navigation.dart';
++import 'package:simple_live_tv_app/services/watch_stat_service.dart';
+ import 'package:simple_live_tv_app/widgets/highlight_widget.dart';
+ import 'package:simple_live_tv_app/widgets/net_image.dart';
+ 
+@@ -64,6 +65,13 @@
+   int get liveStatus => widget.liveStatus;
+   bool get playing => widget.playing;
+   bool get showLiveCover => widget.showLiveCover;
++
++  @override
++  void initState() {
++    super.initState();
++    // 观看统计库是异步打开的，就绪后 Rx 快照会自动触发徽标重建
++    WatchStatService.instance.ensureReady();
++  }
+ 
+   @override
+   void dispose() {
+@@ -197,6 +205,7 @@
+                         active: true,
+                         focused: focused,
+                       ),
++                    _buildWatchBadge(focused),
+                   ],
+                 ),
+               ],
+@@ -275,6 +284,7 @@
+                         focused: focused,
+                       ),
+                     ],
++                    _buildWatchBadge(focused),
+                   ],
+                 ),
+               ],
+@@ -535,6 +545,48 @@
+     );
+   }
+ 
++  /// 累计观看时长徽标（纯本地统计）
++  ///
++  /// 没有记录、或累计不足 1 分钟时返回空组件，不占位、不显示，
++  /// 避免一堆“0分钟”把卡片塞满。
++  Widget _buildWatchBadge(bool focused) {
++    return Obx(
++      () {
++        final label = WatchStatService.instance.labelOf(siteId, roomId);
++        if (label == null) {
++          return const SizedBox.shrink();
++        }
++        return Container(
++          margin: EdgeInsets.only(left: 10.w),
++          padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 4.w),
++          decoration: BoxDecoration(
++            color: focused ? Colors.black26 : Colors.white24,
++            borderRadius: BorderRadius.circular(999),
++          ),
++          child: Row(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              Icon(
++                Icons.av_timer,
++                size: 14.w,
++                color: focused ? Colors.black87 : Colors.white70,
++              ),
++              SizedBox(width: 3.w),
++              Text(
++                label,
++                maxLines: 1,
++                style: TextStyle(
++                  fontSize: 16.w,
++                  color: focused ? Colors.black87 : Colors.white70,
++                ),
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++
+   Widget _buildBadge({
+     required String text,
+     required bool active,
+--- a/simple_live_tv_app/lib/modules/live_room/live_room_controller.dart
++++ b/simple_live_tv_app/lib/modules/live_room/live_room_controller.dart
+@@ -26,6 +26,7 @@
+ import 'package:simple_live_tv_app/services/current_room_service.dart';
+ import 'package:simple_live_tv_app/services/db_service.dart';
+ import 'package:simple_live_tv_app/services/follow_user_service.dart';
++import 'package:simple_live_tv_app/services/watch_stat_service.dart';
+ import 'package:wakelock_plus/wakelock_plus.dart';
+ import 'package:window_manager/window_manager.dart';
+ 
+@@ -181,6 +182,7 @@
+ 
+     loadData();
+     unawaited(syncDesktopFullscreenState());
++    WatchStatService.instance.beginWatch(site.id, roomId);
+ 
+     super.onInit();
+   }
+@@ -1737,6 +1739,7 @@
+     rxSite.value = site;
+     rxRoomId.value = roomId;
+     CurrentRoomService.instance.setRoom(site, roomId);
++    WatchStatService.instance.beginWatch(site.id, roomId);
+     followed.value = DBService.instance.getFollowExist("${site.id}_$roomId");
+     specialFollowed.value = DBService.instance.followBox
+             .get("${site.id}_$roomId")
+@@ -1847,18 +1850,22 @@
+       //进入后台，关闭弹幕
+       danmakuController?.clear();
+       isBackground = true;
++      // 进后台不算观看时长
++      WatchStatService.instance.pauseWatch();
+     } else
+     //返回前台
+     if (state == AppLifecycleState.resumed) {
+       Log.d("返回前台");
+       _refreshAutoExitCountdown();
+       isBackground = false;
++      WatchStatService.instance.resumeWatch();
+     }
+   }
+ 
+   @override
+   void onClose() {
+     _roomDisposed = true;
++    WatchStatService.instance.endWatch();
+     WidgetsBinding.instance.removeObserver(this);
+     autoExitTimer?.cancel();
+     _autoExitSession.stop();
+diff --git a/simple_live_tv_app/lib/services/watch_stat_service.dart b/simple_live_tv_app/lib/services/watch_stat_service.dart
+new file mode 100644
+--- /dev/null
++++ b/simple_live_tv_app/lib/services/watch_stat_service.dart
+@@ -0,0 +1,129 @@
++import 'dart:async';
++
++import 'package:get/get.dart';
++import 'package:hive/hive.dart';
++
++/// 主播累计观看时长（纯本地统计，不上传）
++///
++/// 归集键：`站点ID_房间号`，与关注记录的键保持一致。
++/// 数据存在独立的 Hive 盒子里，不碰上游已有的任何 box，
++/// 因此上游改动数据结构也不影响这里。
++class WatchStatService {
++  WatchStatService._();
++
++  static final WatchStatService instance = WatchStatService._();
++
++  static const String boxName = "TVJinxWatchStat";
++
++  /// 每 20 秒落一次盘：进程被系统杀掉时最多丢 20 秒
++  static const Duration flushInterval = Duration(seconds: 20);
++
++  /// 秒数快照，供界面 Obx 订阅
++  final RxMap<String, int> seconds = <String, int>{}.obs;
++
++  Box<dynamic>? _box;
++  Future<void>? _loading;
++  Timer? _flushTimer;
++  String? _key;
++  DateTime? _segmentStart;
++
++  static String keyOf(String siteId, String roomId) => "${siteId}_$roomId";
++
++  Future<void> ensureReady() => _loading ??= _load();
++
++  Future<void> _load() async {
++    try {
++      final box = await Hive.openBox(boxName);
++      _box = box;
++      for (final k in box.keys) {
++        final v = box.get(k);
++        if (v is int && v > 0) {
++          seconds["$k"] = v;
++        }
++      }
++    } catch (_) {
++      // 统计库打不开时不影响播放，退化为仅本次运行内统计
++    }
++  }
++
++  int secondsOf(String siteId, String roomId) =>
++      seconds[keyOf(siteId, roomId)] ?? 0;
++
++  /// 卡片上显示的文字。不足 1 分钟或没有记录时返回 null（不显示徽标）
++  String? labelOf(String siteId, String roomId) {
++    final total = secondsOf(siteId, roomId);
++    final minutes = total ~/ 60;
++    if (minutes < 1) {
++      return null;
++    }
++    final hours = minutes ~/ 60;
++    final rest = minutes % 60;
++    if (hours < 1) {
++      return "${rest}分钟";
++    }
++    if (rest == 0) {
++      return "${hours}小时";
++    }
++    return "${hours}小时${rest}分";
++  }
++
++  /// 进入直播间：结算上一段，开始新的一段
++  void beginWatch(String siteId, String roomId) {
++    final next = keyOf(siteId, roomId);
++    if (_key == next && _segmentStart != null) {
++      return;
++    }
++    _flush();
++    _key = next;
++    _segmentStart = DateTime.now();
++    _flushTimer?.cancel();
++    _flushTimer = Timer.periodic(flushInterval, (_) => _flush());
++    unawaited(ensureReady());
++  }
++
++  /// 进入后台：停止计时，但保留当前房间
++  void pauseWatch() {
++    _flush();
++    _segmentStart = null;
++  }
++
++  void resumeWatch() {
++    if (_key == null || _segmentStart != null) {
++      return;
++    }
++    _segmentStart = DateTime.now();
++  }
++
++  /// 离开直播间
++  void endWatch() {
++    _flush();
++    _flushTimer?.cancel();
++    _flushTimer = null;
++    _key = null;
++    _segmentStart = null;
++  }
++
++  void _flush() {
++    final key = _key;
++    final start = _segmentStart;
++    if (key == null || start == null) {
++      return;
++    }
++    final now = DateTime.now();
++    final delta = now.difference(start).inSeconds;
++    if (delta <= 0) {
++      return;
++    }
++    _segmentStart = now;
++    addSeconds(key, delta);
++  }
++
++  void addSeconds(String key, int delta) {
++    final current = (seconds[key] ?? 0) + delta;
++    seconds[key] = current;
++    final box = _box;
++    if (box != null) {
++      unawaited(box.put(key, current));
++    }
++  }
++}
