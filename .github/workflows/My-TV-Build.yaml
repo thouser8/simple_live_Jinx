@@ -39,6 +39,11 @@
 #      MAIL_TO        收件邮箱
 #    换邮箱只改这三个 secret，不用动这个文件。
 #    邮件发失败不会让构建失败（包已经在 Releases 里了），只在日志和 Summary 里告警。
+#
+#  【构建失败也发邮件】
+#    另一个 job「notify-failure」在 build-tv 失败后运行，邮件里写明哪一步失败、
+#    为什么失败（附常见原因对照）、日志链接。它不依赖 build-tv 的产物，
+#    所以哪怕编译阶段就挂了，也能正常发出。
 # =============================================================================
 name: My TV Build (Jinx)
 
@@ -52,6 +57,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 env:
   APP_LABEL: "Jinx Live"
@@ -347,4 +353,128 @@ jobs:
               print(f"::warning::邮件发送失败（不影响构建）：{type(e).__name__}: {e}")
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
                   f.write(f"\n- 邮件通知：**发送失败** {type(e).__name__}: {e}\n")
+          PY
+
+  # ---------------------------------------------------------------------------
+  #  构建失败 → 也发邮件
+  #
+  #  单独一个 job：build-tv 一失败就跑，不需要 build-tv 的任何产物，
+  #  所以编译阶段就挂掉的场景也能正常发出通知。
+  #  会去 Actions API 查「哪一步失败」，并给出对应的常见原因。
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    needs: build-tv
+    if: failure()
+    runs-on: ubuntu-latest
+    env:
+      MU: ${{ secrets.MAIL_USERNAME }}
+      MC: ${{ secrets.MAIL_AUTH_CODE }}
+      MT: ${{ secrets.MAIL_TO }}
+    steps:
+      - name: 发失败邮件
+        if: env.MU != '' && env.MC != '' && env.MT != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE: ${{ github.event.inputs.source }}
+        run: |
+          python3 - <<'PY'
+          import os, json, ssl, smtplib, urllib.request, datetime
+          from email.message import EmailMessage
+          from email.utils import formatdate, make_msgid
+
+          user = os.environ["MU"]; code = os.environ["MC"]; to = os.environ["MT"]
+          repo = os.environ["GITHUB_REPOSITORY"]; run_id = os.environ["GITHUB_RUN_ID"]
+          sha  = os.environ["GITHUB_SHA"]; src = (os.environ.get("SOURCE") or "手动").strip()
+          now  = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+          run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+          # 常见失败原因对照表
+          HINT = {
+              "1. 签出源码": "拉代码失败，多为网络或仓库权限问题。",
+              "1b. 应用本地补丁": "上游改了补丁涉及的文件（补丁打不上）。需要按上游新代码重新生成 custom/patches 里的补丁。",
+              "2. 应用应用名与包名": "上游改了 AndroidManifest.xml 或 build.gradle.kts 的写法，第 2 步的替换匹配不到了。",
+              "3. 还原签名（配了 secret 才生效）": "签名密钥 secret 缺失或损坏。",
+              "6. 拉依赖": "flutter pub get 失败，多为 pub 源网络问题，重跑通常即可。",
+              "7. 编译 APK": "Dart/Kotlin 编译错误、依赖下载失败或内存不足。看日志里的第一条 error。",
+              "7b. 核对签名（确认真的用了你的密钥）": "签名没生效或指纹与 TV_CERT_SHA256 不符（可能会产出 debug 签名的包，这里主动拦下了）。",
+              "7c. 核对内置字体（确认 MiSans 真的进了包）": "MiSans 字体没被打进 APK，检查 assets/fonts 与 pubspec.yaml。",
+              "11. 发到 Releases": "发布失败，常见是 tag 已存在或 token 权限不足。",
+          }
+
+          failed, duration = [], ""
+          try:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs",
+                  headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                           "Accept": "application/vnd.github+json", "User-Agent": "jinx-fail-mail"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  jobs = json.load(r)["jobs"]
+              main = [j for j in jobs if j["name"] == "build-tv"]
+              if main:
+                  j = main[0]
+                  for s in j.get("steps", []):
+                      if s.get("conclusion") in ("failure", "timed_out"):
+                          failed.append(s["name"])
+                  a, b = j.get("started_at"), j.get("completed_at")
+                  if a and b:
+                      dt = datetime.datetime.fromisoformat(b.replace("Z", "+00:00")) - \
+                           datetime.datetime.fromisoformat(a.replace("Z", "+00:00"))
+                      duration = f"{int(dt.total_seconds() // 60)} 分 {int(dt.total_seconds() % 60)} 秒"
+          except Exception as e:
+              print(f"::warning::查询失败步骤时出错：{type(e).__name__}: {e}")
+
+          if not failed:
+              failed = ["（未能从 API 取到失败的步骤名，请看日志）"]
+
+          hint_lines = [HINT.get(n) for n in failed if HINT.get(n)]
+
+          text = [f"Jinx Live TV 构建失败，本次没有产出新包。",
+                  f"时间：{now}（北京时间）", f"触发来源：{src}", f"提交：{sha[:8]}"]
+          if duration:
+              text.append(f"耗时：{duration}")
+          text += ["", "失败步骤："] + [f"- {n}" for n in failed]
+          if hint_lines:
+              text += ["", "可能原因："] + [f"- {h}" for h in hint_lines]
+          text += ["", f"运行日志：{run_url}",
+                   "（打开后点左侧红色的那一步，日志末尾就是报错出处）",
+                   "", "修好后在 Actions → My TV Build (Jinx) → Run workflow 重跑即可。"]
+          if "1b. 应用本地补丁" in failed:
+              text += ["", "提示：这类失败多半是上游改了被补丁的文件，需要重新生成补丁；",
+                       "      也可以先把失败的补丁临时移出 custom/patches/ 应急出包。"]
+
+          rows = "".join(
+              f'<li style="margin:4px 0"><b>{n}</b></li>' for n in failed)
+          hint_html = "".join(
+              f'<li style="margin:4px 0">{h}</li>' for h in hint_lines)
+          html = f"""<div style="font-family:-apple-system,Segoe UI,Microsoft YaHei,sans-serif;font-size:14px;color:#222;line-height:1.7">
+          <h2 style="margin:0 0 12px;font-size:18px;color:#c0392b">Jinx Live TV 构建失败</h2>
+          <p style="margin:0 0 4px">本次<b>没有产出新包</b>。</p>
+          <p style="margin:0 0 4px">时间：{now}（北京时间）　触发来源：<b>{src}</b></p>
+          <p style="margin:0 0 4px">提交：<code>{sha[:8]}</code>{'　耗时：' + duration if duration else ''}</p>
+          <p style="margin:16px 0 6px"><b>失败步骤</b></p>
+          <ul style="margin:0;padding-left:20px">{rows}</ul>
+          {('<p style="margin:16px 0 6px"><b>可能原因</b></p><ul style="margin:0;padding-left:20px">' + hint_html + '</ul>') if hint_html else ''}
+          <p style="margin:18px 0 0"><a href="{run_url}" style="color:#1a73e8">打开运行日志</a>（点左侧红色的那一步，日志末尾就是报错出处）</p>
+          <p style="margin:16px 0 0;color:#888;font-size:12px">此邮件由 GitHub Actions 自动发送。</p>
+          </div>"""
+
+          msg = EmailMessage()
+          msg["Subject"] = f"[Jinx Live] 构建失败：{failed[0]} ({now})"
+          msg["From"] = user
+          msg["To"] = to
+          msg["Date"] = formatdate(localtime=True)
+          msg["Message-ID"] = make_msgid()
+          msg.set_content("\n".join(text))
+          msg.add_alternative(html, subtype="html")
+
+          try:
+              with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30,
+                                    context=ssl.create_default_context()) as s:
+                  s.login(user, code)
+                  s.send_message(msg)
+              print(f"失败通知已发送：{to}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write(f"\n- 失败通知邮件：已发送至 {to}\n")
+          except Exception as e:
+              print(f"::warning::失败邮件发送失败：{type(e).__name__}: {e}")
           PY
