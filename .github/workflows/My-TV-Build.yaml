@@ -134,7 +134,7 @@ jobs:
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           INFO=$("$BT/apksigner" verify --print-certs "$APK")
           echo "$INFO"
-          GOT=$(echo "$INFO" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d ' ' | tr 'a-f' 'A-F')
+          GOT=$(echo "$INFO" | sed -n 's/.*certificate SHA-256 digest: *//p' | tr -d ' \r' | tr 'a-f' 'A-F' | head -1)
           echo "实际签名证书 SHA-256 : $GOT"
           if echo "$INFO" | grep -qi "CN=Android Debug"; then
             echo "::error::检出的是 Android Debug 证书，签名密钥没有生效"
