@@ -1,0 +1,82 @@
+# =============================================================================
+#  Sync Upstream —— 每周从 June6699/dart_simple_live 同步一次
+#
+#  【为什么不会冲突】
+#    你的仓库和上游共享同一套提交历史（建线时就是用完整克隆接上的）。
+#    你独有的内容只有两个文件：
+#        .github/workflows/My-TV-Build.yaml
+#        .github/workflows/sync-upstream.yaml
+#    这两个文件名上游都没有，上游永远不可能去改它们。
+#    所以每次合并 = 「把上游的新提交接在你的一次新增之上」，Git 天然不会冲突。
+#
+#  【万一真的冲突了会怎样】
+#    工作流会立刻 git merge --abort，仓库一个字节都不改，然后报错让你手动处理。
+#    不会留下半合并的烂摊子。
+#
+#  【时间】
+#    每周一 03:00 UTC = 北京时间 11:00
+#    也可以随时在 Actions 页面手动点 Run workflow
+# =============================================================================
+name: Sync Upstream (同步 June6699)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  UPSTREAM: https://github.com/June6699/dart_simple_live.git
+  # 同步到新代码后是否自动打一个 TV 包（不需要就改成 false）
+  AUTO_BUILD: "true"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 签出（要完整历史才能合并）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 2. 合并上游
+        id: merge
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+          git fetch --quiet upstream master
+
+          BEFORE=$(git rev-parse HEAD)
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          echo "落后上游 $BEHIND 个提交" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ "$BEHIND" = "0" ]; then
+            echo "上游没有新提交，无需同步。" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge --no-edit upstream/master; then
+            git push origin HEAD:master
+            echo "已同步：$BEFORE → $(git rev-parse --short HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort 2>/dev/null || true
+            echo "::error::上游改动与你的文件冲突，本次同步已放弃，仓库未被修改。"
+            echo "**冲突**：已放弃本次合并，仓库保持原样。" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: 3. 有新代码就打一个 TV 包
+        if: steps.merge.outputs.changed == 'true' && env.AUTO_BUILD == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run My-TV-Build.yaml --ref master --repo "$GITHUB_REPOSITORY"
+          echo "已触发 TV 构建，完成后到 Actions 页面看结果。" | tee -a "$GITHUB_STEP_SUMMARY"

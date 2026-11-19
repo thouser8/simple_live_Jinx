@@ -1,0 +1,154 @@
+# =============================================================================
+#  Jinx Live —— 你自己的 Android TV 打包流程
+#
+#  【为什么这样改名字不会被上游覆盖】
+#    你的仓库里，上游文件一个字节都不改：AndroidManifest.xml 里还是
+#    "Simple Live TV"，build.gradle.kts 里还是 com.xycz.simple_live_tv。
+#    改名字和包名的动作，全部发生在每次打包时（下面第 2 步，临时改、只改工作区）。
+#    所以：
+#      · 上游更新永远碰不到这两个值 —— 它更新的文件和你仓库里的完全一致
+#      · 每周同步 = 纯合并/快进，Git 没有东西可冲突
+#      · 你随时改下面 env 里的两行就能换名字换包名，改完重新跑一次即可
+#
+#  【用法】
+#    Actions → 左侧 "My TV Build (Jinx)" → Run workflow
+#
+#  【要改的东西都在这两行】
+#    APP_LABEL : 电视桌面上显示的名字
+#    APP_ID    : 安装包的唯一标识。留空 = 保持原版 com.xycz.simple_live_tv
+#                填了 = 用你填的，可与官方版同时安装互不覆盖
+#
+#  【签名，可选】
+#    Settings → Secrets and variables → Actions 里配这四个就用你的签名：
+#      TV_KEYSTORE_BASE64 / TV_STORE_PASSWORD / TV_KEY_PASSWORD / TV_KEY_ALIAS
+#    不配也能出包，Flutter 会用 debug 签名，一样能装。
+# =============================================================================
+name: My TV Build (Jinx)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_LABEL: "Jinx Live"
+  APP_ID: "com.xycz.simple_live_tv.jinx"
+
+jobs:
+  build-tv:
+    runs-on: ubuntu-latest
+    # 密钥必须先在 env 里落地，不能直接写在 if: 里（GitHub 不允许 if 直接引用 secrets）
+    env:
+      KS: ${{ secrets.TV_KEYSTORE_BASE64 }}
+      SP: ${{ secrets.TV_STORE_PASSWORD }}
+      KP: ${{ secrets.TV_KEY_PASSWORD }}
+      KA: ${{ secrets.TV_KEY_ALIAS }}
+    steps:
+      - name: 1. 签出源码
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      #  改名字 + 改包名
+      #
+      #  做法：先记录原始值，改完再核对，对不上就 ::error:: 停下，绝不产出
+      #  「名字没改成功但看着像成功」的包。
+      #
+      #  防重复：包名替换是按「整体覆盖」而不是「追加后缀」，所以重复跑
+      #  不会出现 com.xycz.simple_live_tv.jinx.jinx 这种叠加。
+      # -----------------------------------------------------------------------
+      - name: 2. 应用应用名与包名
+        run: |
+          set -e
+          TV=simple_live_tv_app
+          MF="$TV/android/app/src/main/AndroidManifest.xml"
+          GR="$TV/android/app/build.gradle.kts"
+
+          echo "===== 改动前 ====="
+          grep -m1 'android:label' "$MF" || true
+          grep -m1 'applicationId' "$GR" || true
+
+          if [ -n "$APP_LABEL" ]; then
+            perl -pi -e 's{(android:label=")[^"]*(")}{$1$ENV{APP_LABEL}$2}' "$MF"
+          fi
+
+          if [ -n "$APP_ID" ]; then
+            perl -pi -e 's{(applicationId\s*=\s*")[^"]*(")}{$1$ENV{APP_ID}$2}' "$GR"
+          fi
+
+          echo "===== 改动后 ====="
+          NEW_LABEL=$(sed -n 's/.*android:label="\([^"]*\)".*/\1/p' "$MF" | head -1)
+          NEW_ID=$(sed -n 's/^[[:space:]]*applicationId = "\(.*\)".*/\1/p' "$GR" | head -1)
+          echo "显示名 : $NEW_LABEL"
+          echo "包名   : $NEW_ID"
+
+          echo "===== 核对 ====="
+          if [ -n "$APP_LABEL" ] && [ "$NEW_LABEL" != "$APP_LABEL" ]; then
+            echo "::error::显示名没改成 $APP_LABEL（实际：$NEW_LABEL），上游可能改了 manifest 写法，请检查第 2 步"
+            exit 1
+          fi
+          if [ -n "$APP_ID" ] && [ "$NEW_ID" != "$APP_ID" ]; then
+            echo "::error::包名没改成 $APP_ID（实际：$NEW_ID），上游可能改了 gradle 写法，请检查第 2 步"
+            exit 1
+          fi
+          echo "两项都已按预期生效"
+
+      - name: 3. 还原签名（配了 secret 才生效）
+        if: env.KS != ''
+        run: |
+          printf '%s' "$KS" | base64 -d > simple_live_tv_app/android/release-keystore.jks
+          printf 'storeFile=../release-keystore.jks\nstorePassword=%s\nkeyPassword=%s\nkeyAlias=%s\n' \
+            "$SP" "$KP" "$KA" > simple_live_tv_app/android/key.properties
+
+      - name: 4. Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+
+      - name: 5. Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.9"
+          cache: true
+
+      - name: 6. 拉依赖
+        run: |
+          cd simple_live_tv_app
+          flutter pub get
+
+      - name: 7. 编译 APK
+        run: |
+          cd simple_live_tv_app
+          flutter build apk --release --split-per-abi
+
+      - name: 8. 存到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jinx-tv-apk
+          path: simple_live_tv_app/build/app/outputs/flutter-apk/app-*-release.apk
+
+      - name: 9. 读版本号
+        id: ver
+        run: |
+          V=$(python3 -c "import json;print(json.load(open('assets/tv_app_version.json'))['version'])")
+          echo "v=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 10. 打时间戳
+        id: stamp
+        run: echo "d=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+      - name: 11. 发到 Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "jinx_v${{ steps.ver.outputs.v }}-${{ steps.stamp.outputs.d }}"
+          name: "Jinx Live TV ${{ steps.ver.outputs.v }} (${{ steps.stamp.outputs.d }})"
+          body: |
+            来源提交 ${{ github.sha }}
+            包名 ${{ env.APP_ID }}
+          prerelease: true
+          files: |
+            simple_live_tv_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            simple_live_tv_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            simple_live_tv_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
