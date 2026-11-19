@@ -3,15 +3,17 @@
 #
 #  【为什么不会冲突】
 #    你的仓库和上游共享同一套提交历史（建线时就是用完整克隆接上的）。
-#    你独有的内容只有两个文件：
-#        .github/workflows/My-TV-Build.yaml
-#        .github/workflows/sync-upstream.yaml
-#    这两个文件名上游都没有，上游永远不可能去改它们。
-#    所以每次合并 = 「把上游的新提交接在你的一次新增之上」，Git 天然不会冲突。
+#    你独有的新增文件：.github/workflows/ 下的两个工作流、custom/patches/ 下
+#    的补丁文件，上游都没有，永远不会被改。
+#
+#  【README.md 特例】
+#    本仓库首页 README.md 已重写（只保留协议、引用、鸣谢、声明），与上游不同。
+#    上游一旦改 README.md 就会冲突，所以同步时先合并、后强制把 README.md
+#    恢复成我们自己的版本再提交：README 永远听你的，其余文件照常跟上上游。
 #
 #  【万一真的冲突了会怎样】
-#    工作流会立刻 git merge --abort，仓库一个字节都不改，然后报错让你手动处理。
-#    不会留下半合并的烂摊子。
+#    只有 README.md 允许冲突；其它文件只要冲突就立刻 git merge --abort，
+#    仓库一个字节都不改，然后报错让你手动处理。
 #
 #  【时间】
 #    每周一 03:00 UTC = 北京时间 11:00
@@ -62,16 +64,32 @@ jobs:
             exit 0
           fi
 
-          if git merge --no-edit upstream/master; then
-            git push origin HEAD:master
-            echo "已同步：$BEFORE → $(git rev-parse --short HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            git merge --abort 2>/dev/null || true
-            echo "::error::上游改动与你的文件冲突，本次同步已放弃，仓库未被修改。"
-            echo "**冲突**：已放弃本次合并，仓库保持原样。" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
+          # 先合并但不提交：README.md 冲突属于预期情况，交给下面统一处理
+          set +e
+          git merge --no-commit --no-ff upstream/master
+          MERGE_RC=$?
+          set -e
+
+          if [ "$MERGE_RC" != "0" ]; then
+            # 除 README.md 之外的文件不允许冲突
+            OTHERS=$(git diff --name-only --diff-filter=U | grep -vx 'README.md' || true)
+            if [ -n "$OTHERS" ]; then
+              echo "::error::上游改动与以下文件冲突：$OTHERS，本次同步已放弃，仓库未被修改。"
+              echo "**冲突**：$OTHERS，已放弃本次合并，仓库保持原样。" >> "$GITHUB_STEP_SUMMARY"
+              git merge --abort
+              exit 1
+            fi
+            echo "README.md 与上游冲突，按约定保留本仓库版本。" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+
+          # 无论是否冲突，README.md 一律用我们自己的版本
+          git checkout HEAD -- README.md
+          git add README.md
+          git commit --no-edit
+
+          git push origin HEAD:master
+          echo "已同步：$BEFORE → $(git rev-parse --short HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: 3. 有新代码就打一个 TV 包
         if: steps.merge.outputs.changed == 'true' && env.AUTO_BUILD == 'true'
