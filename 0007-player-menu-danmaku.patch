@@ -1,0 +1,20 @@
+--- a/simple_live_tv_app/lib/modules/live_room/live_room_page.dart
++++ b/simple_live_tv_app/lib/modules/live_room/live_room_page.dart
+@@ -95,9 +95,14 @@
+       return;
+     }
+ 
+-    // 点击Menu打开/关闭设置
+-    if (key.logicalKey == LogicalKeyboardKey.contextMenu ||
+-        key.logicalKey == LogicalKeyboardKey.arrowRight) {
++    // 点击Menu开关弹幕
++    if (key.logicalKey == LogicalKeyboardKey.contextMenu) {
++      controller.toggleDanmaku();
++      return;
++    }
++
++    // 点击右键打开/关闭设置
++    if (key.logicalKey == LogicalKeyboardKey.arrowRight) {
+       showPlayerSettings(controller);
+       return;
+     }
