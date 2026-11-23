@@ -173,7 +173,7 @@ class IptvPlayerPage extends GetView<IptvPlayerController> {
     );
   }
 
-  /// 线路选择弹窗，展示所有可用线路，标注源名称
+  /// 线路选择弹窗，展示所有可用线路，标注源名称与探活结果
   void _showLineSelector(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -187,6 +187,7 @@ class IptvPlayerPage extends GetView<IptvPlayerController> {
           return ListTile(
             leading: NetImage(line.logo, width: 36, height: 36, borderRadius: 8),
             title: Text(line.sourceName),
+            subtitle: _lineStatusText(line.url),
             trailing: selected
                 ? const Icon(Icons.check)
                 : _lineStatusDot(line.url),
@@ -200,9 +201,28 @@ class IptvPlayerPage extends GetView<IptvPlayerController> {
     );
   }
 
-  /// 线路连通状态圆点：复用频道页红黄绿探测缓存，未检测过不显示
+  /// 线路探活文案：地址区分同源多线路，附带连通状态与延迟；未检测过只展示地址
+  Text _lineStatusText(String url) {
+    final status = controller.displayStatus(url);
+    final ms = IptvService.instance.lastKnownLineInfo(url)?.latencyMs ?? 0;
+    final statusText = switch (status) {
+      1 => "连通良好 · ${ms}ms",
+      2 => "连通较慢 · ${ms}ms",
+      3 => "探测失败",
+      _ => "",
+    };
+    final text = statusText.isEmpty ? url : "$statusText\n$url";
+    return Text(
+      text,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 11),
+    );
+  }
+
+  /// 线路连通状态圆点：本次探测或最近已知状态，未检测过不显示
   Widget? _lineStatusDot(String url) {
-    final status = IptvService.instance.freshLineStatus(url);
+    final status = controller.displayStatus(url);
     final color = switch (status) {
       1 => Colors.green,
       2 => Colors.amber,
